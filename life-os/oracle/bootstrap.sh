@@ -78,18 +78,29 @@ if [[ -z "$SUB" ]]; then
  SUB="$(oci network subnet create --region "$REG" --compartment-id "$T" --vcn-id "$VCN" --cidr-block 10.42.1.0/24 --display-name life-os-subnet --dns-label subnet --prohibit-public-ip-on-vnic false --wait-for-state AVAILABLE --query data.id --raw-output)"
 fi
 [[ "$SUB" == ocid1.subnet.* ]] || die 'Subnet failed.'
+# Try requested 2 OCPU/12GB first, then smaller 1 OCPU/6GB, both A1 Always Free.
+# Do not try paid shapes and never retry non-capacity errors.
 ID=''
-for AD in $(jq -r '.data[].name' "$D/ads.json"); do
- echo "Trying Always Free VM.Standard.A1.Flex 2 OCPU/12GB in $AD"
- if J="$(oci compute instance launch --region "$REG" --compartment-id "$T" --availability-domain "$AD" --display-name life-os --shape VM.Standard.A1.Flex --shape-config '{"ocpus":2,"memoryInGBs":12}' --image-id "$IMG" --boot-volume-size-in-gbs 50 --subnet-id "$SUB" --assign-public-ip true --ssh-authorized-keys-file "$K.pub" 2>"$D/launch.err")"; then
-  ID="$(jq -r '.data.id//empty' <<< "$J")"; break
- fi
- if ! grep -Eiq 'out.?of.?host.?capacity|capacity' "$D/launch.err"; then cat "$D/launch.err" >&2; die 'Non-capacity launch error: no fallback.'; fi
+CHOSEN=''
+for SPEC in '2:12' '1:6'; do
+ OCPU="${SPEC%%:*}"
+ RAM="${SPEC##*:}"
+ CONFIG="$(jq -cn --argjson cpu "$OCPU" --argjson memory "$RAM" '{ocpus:$cpu,memoryInGBs:$memory}')"
+ for AD in $(jq -r '.data[].name' "$D/ads.json"); do
+  echo "Trying Always Free VM.Standard.A1.Flex ${OCPU} OCPU/${RAM}GB in $AD"
+  if J="$(oci compute instance launch --region "$REG" --compartment-id "$T" --availability-domain "$AD" --display-name life-os --shape VM.Standard.A1.Flex --shape-config "$CONFIG" --image-id "$IMG" --boot-volume-size-in-gbs 50 --subnet-id "$SUB" --assign-public-ip true --ssh-authorized-keys-file "$K.pub" 2>"$D/launch.err")"; then
+   ID="$(jq -r '.data.id//empty' <<< "$J")"
+   CHOSEN="${OCPU} OCPU / ${RAM}GB"
+   break
+  fi
+  if ! grep -Eiq 'out.?of.?host.?capacity|capacity' "$D/launch.err"; then cat "$D/launch.err" >&2; die 'Non-capacity launch error: no fallback.'; fi
+ done
+ [[ "$ID" == ocid1.instance.* ]] && break
 done
-[[ "$ID" == ocid1.instance.* ]] || die 'No A1 capacity. Paid VM not attempted. VCN may remain: do not rerun before inspecting it.'
+[[ "$ID" == ocid1.instance.* ]] || die 'No A1 capacity at 2/12 or 1/6. Paid VM not attempted. The existing VCN may remain.'
 echo "$ID" > "$D/instance-ocid"
 oci compute instance get --region "$REG" --instance-id "$ID" --wait-for-state RUNNING > "$D/instance.json" || die 'VM created, RUNNING not confirmed.'
 VN="$(oci compute vnic-attachment list --region "$REG" --compartment-id "$T" --instance-id "$ID" --query 'data[0]."vnic-id"' --raw-output)"
 IP="$(oci network vnic get --region "$REG" --vnic-id "$VN" --query 'data."public-ip"' --raw-output)"
-printf '\nCREATED RUNNING: %s\nIP: %s\nKey: %s\nTo connect: ssh -i %s ubuntu@%s\n' "$ID" "$IP" "$K" "$K" "$IP"
+printf '\nCREATED RUNNING: %s\nShape: %s\nIP: %s\nKey: %s\nTo connect: ssh -i %s ubuntu@%s\n' "$ID" "$CHOSEN" "$IP" "$K" "$K" "$IP"
 printf 'VPS is ready. ChatGPT browser bridge is NOT installed by this step.\n'
