@@ -148,5 +148,7 @@ echo "$ID" > "$D/instance-ocid"
 oci compute instance get --region "$REG" --instance-id "$ID" --wait-for-state RUNNING > "$D/instance.json" || die 'VM created, RUNNING not confirmed.'
 VN="$(oci compute vnic-attachment list --region "$REG" --compartment-id "$T" --instance-id "$ID" --query 'data[0]."vnic-id"' --raw-output)"
 IP="$(oci network vnic get --region "$REG" --vnic-id "$VN" --query 'data."public-ip"' --raw-output)"
-printf '\nCREATED RUNNING: %s\nShape: %s\nIP: %s\nKey: %s\nTo connect: ssh -i %s ubuntu@%s\n' "$ID" "$CHOSEN" "$IP" "$K" "$K" "$IP"
+PRIVATE_IP="$(oci network vnic get --region "$REG" --vnic-id "$VN" --query 'data."private-ip"' --raw-output)"
+[[ "$PRIVATE_IP" == *.*.*.* ]] || die 'VM RUNNING, but private IP not resolved.'
+printf '\nCREATED RUNNING: %s\nShape: %s\nPrivate IP: %s\nPublic IP (outbound only): %s\nKey: %s\nFrom Cloud Shell PRIVATE networking: ssh -i %s ubuntu@%s\n' "$ID" "$CHOSEN" "$PRIVATE_IP" "$IP" "$K" "$K" "$PRIVATE_IP"
 printf 'Cloud-init requested Docker, snap Chromium, and Xvfb. RUNNING does not prove successful installation.\nCloud Shell Private Networking is required for SSH; internet ingress is disabled. Web Bridge is NOT deployed.\n'
