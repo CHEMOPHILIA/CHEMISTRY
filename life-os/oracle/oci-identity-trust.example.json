@@ -1,0 +1,23 @@
+{
+  "schemas": [
+    "urn:ietf:params:scim:schemas:oracle:idcs:IdentityPropagationTrust"
+  ],
+  "active": true,
+  "name": "CHEMISTRY GitHub Actions A1 Provisioner",
+  "type": "JWT",
+  "issuer": "https://token.actions.githubusercontent.com",
+  "publicKeyEndpoint": "https://token.actions.githubusercontent.com/.well-known/jwks",
+  "subjectType": "Resource",
+  "allowImpersonation": true,
+  "impersonatingResource": "githubactions",
+  "oauthClients": [
+    "<EXCHANGE_OAUTH_CLIENT_ID>"
+  ],
+  "claimValidations": [
+    { "name": "repository", "value": "CHEMOPHILIA/CHEMISTRY" },
+    { "name": "ref", "value": "refs/heads/main" },
+    { "name": "workflow_ref", "value": "CHEMOPHILIA/CHEMISTRY/.github/workflows/oci-a1-retry.yml@refs/heads/main" },
+    { "name": "aud", "value": "github-actions" },
+    { "name": "repository_owner", "value": "CHEMOPHILIA" }
+  ]
+}
