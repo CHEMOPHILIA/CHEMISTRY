@@ -26,21 +26,35 @@ oci compute image list --region "$REG" --compartment-id "$T" --operating-system 
 IMG="$(jq -r '[.data[]|select(."lifecycle-state"=="AVAILABLE" and (."display-name"|test("Ubuntu-24.04.*aarch64";"i")))]|.[0].id//empty' "$D/images.json")"
 [[ "$IMG" == ocid1.image.* ]] || die 'No Ubuntu 24.04 ARM image: stopped.'
 oci network vcn list --region "$REG" --compartment-id "$T" --all > "$D/vcns.json" || die 'Cannot inspect VCNs.'
-jq -e '[.data[]|select(."display-name"=="life-os-vcn" and ."lifecycle-state"!="TERMINATED")]|length==0' "$D/vcns.json" >/dev/null || die 'life-os-vcn already exists; refusing duplicate.'
+VCN="$(jq -r '[.data[]|select(."display-name"=="life-os-vcn" and ."lifecycle-state"=="AVAILABLE")]|.[0].id//empty' "$D/vcns.json")"
 K="$HOME/.ssh/life-os-ed25519"
 mkdir -p "$HOME/.ssh"; chmod 700 "$HOME/.ssh"
 if [[ ! -f "$K" ]]; then ssh-keygen -q -t ed25519 -f "$K" -N '' -C life-os; fi
 chmod 600 "$K"; [[ -f "$K.pub" ]] || die 'SSH key missing.'
 echo 'Creating isolated OCI network. Only SSH port 22 will be accessible.'
-VCN="$(oci network vcn create --region "$REG" --compartment-id "$T" --display-name life-os-vcn --cidr-blocks '["10.42.0.0/16"]' --dns-label lifeos --wait-for-state AVAILABLE --query data.id --raw-output)"
+if [[ -z "$VCN" ]]; then
+ VCN="$(oci network vcn create --region "$REG" --compartment-id "$T" --display-name life-os-vcn --cidr-blocks '["10.42.0.0/16"]' --dns-label lifeos --wait-for-state AVAILABLE --query data.id --raw-output)"
+else
+ echo 'Reusing previously created life-os VCN.'
+ oci network vcn get --region "$REG" --vcn-id "$VCN" > "$D/vcn.json"
+ jq -e '.data."cidr-blocks"|index("10.42.0.0/16")!=null' "$D/vcn.json" >/dev/null || die 'Existing VCN CIDR mismatch.'
+fi
 [[ "$VCN" == ocid1.vcn.* ]] || die 'VCN failed.'
 INFO="$(oci network vcn get --region "$REG" --vcn-id "$VCN")"
 RT="$(jq -r '.data."default-route-table-id"' <<< "$INFO")"
 SL="$(jq -r '.data."default-security-list-id"' <<< "$INFO")"
-IG="$(oci network internet-gateway create --region "$REG" --compartment-id "$T" --vcn-id "$VCN" --is-enabled true --display-name life-os-ig --wait-for-state AVAILABLE --query data.id --raw-output)"
+oci network internet-gateway list --region "$REG" --compartment-id "$T" --vcn-id "$VCN" --all > "$D/igs.json"
+IG="$(jq -r '[.data[]|select(."display-name"=="life-os-ig" and ."lifecycle-state"=="AVAILABLE")]|.[0].id//empty' "$D/igs.json")"
+if [[ -z "$IG" ]]; then
+ IG="$(oci network internet-gateway create --region "$REG" --compartment-id "$T" --vcn-id "$VCN" --is-enabled true --display-name life-os-ig --wait-for-state AVAILABLE --query data.id --raw-output)"
+fi
 oci network route-table update --region "$REG" --rt-id "$RT" --route-rules "$(jq -cn --arg ig "$IG" '[{cidrBlock:"0.0.0.0/0",networkEntityId:$ig}]')" --force >/dev/null
 oci network security-list update --region "$REG" --security-list-id "$SL" --ingress-security-rules '[{"source":"0.0.0.0/0","protocol":"6","isStateless":false,"tcpOptions":{"destinationPortRange":{"min":22,"max":22}}}]' --egress-security-rules '[{"destination":"0.0.0.0/0","protocol":"all","isStateless":false}]' --force >/dev/null
-SUB="$(oci network subnet create --region "$REG" --compartment-id "$T" --vcn-id "$VCN" --cidr-block 10.42.1.0/24 --display-name life-os-subnet --dns-label subnet --prohibit-public-ip-on-vnic false --wait-for-state AVAILABLE --query data.id --raw-output)"
+oci network subnet list --region "$REG" --compartment-id "$T" --vcn-id "$VCN" --all > "$D/subnets.json"
+SUB="$(jq -r '[.data[]|select(."display-name"=="life-os-subnet" and ."lifecycle-state"=="AVAILABLE")]|.[0].id//empty' "$D/subnets.json")"
+if [[ -z "$SUB" ]]; then
+ SUB="$(oci network subnet create --region "$REG" --compartment-id "$T" --vcn-id "$VCN" --cidr-block 10.42.1.0/24 --display-name life-os-subnet --dns-label subnet --prohibit-public-ip-on-vnic false --wait-for-state AVAILABLE --query data.id --raw-output)"
+fi
 [[ "$SUB" == ocid1.subnet.* ]] || die 'Subnet failed.'
 ID=''
 for AD in $(jq -r '.data[].name' "$D/ads.json"); do
