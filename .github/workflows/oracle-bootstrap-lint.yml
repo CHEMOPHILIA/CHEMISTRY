@@ -1,0 +1,33 @@
+name: Validate Oracle Always Free bootstrap
+on:
+  push:
+    paths:
+      - 'life-os/oracle/bootstrap.sh'
+      - '.github/workflows/oracle-bootstrap-lint.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  static-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bash syntax
+        run: bash -n life-os/oracle/bootstrap.sh
+      - name: Free-tier and security invariants
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          f=life-os/oracle/bootstrap.sh
+          grep -Fq 'VM.Standard.A1.Flex' "$f"
+          grep -Fq "for SPEC in '2:12' '1:6'" "$f"
+          grep -Fq -- '--boot-volume-size-in-gbs 50' "$f"
+          grep -Fq -- '--user-data-file "$D/cloud-init.yaml"' "$f"
+          grep -Fq 'life-os-private-ssh' "$f"
+          grep -Fq '10.42.0.0/16' "$f"
+          if grep -Fq '"source":"0.0.0.0/0","protocol":"6"' "$f"; then
+            echo 'Forbidden public SSH ingress detected' >&2
+            exit 1
+          fi
+          # Verify the jq ingress rule assertion itself against positive and negative samples.
+          jq -ne '{data:{"ingress-security-rules":[{"source":"10.42.0.0/16","protocol":"6","tcp-options":{"destination-port-range":{"min":22,"max":22}}}]}} | [.data."ingress-security-rules"[]] | length == 1 and (.[0].source=="10.42.0.0/16") and (.[0].protocol=="6") and (.[0]."tcp-options"."destination-port-range".min==22) and (.[0]."tcp-options"."destination-port-range".max==22)' >/dev/null
