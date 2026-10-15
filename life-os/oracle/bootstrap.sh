@@ -14,8 +14,8 @@ PROFILE="${OCI_CLI_PROFILE:-ap-tokyo-1}"
 T="${OCI_CLI_TENANCY:-${OCI_TENANCY_OCID:-}}"
 if [[ "$T" != ocid1.tenancy.* ]]; then
  T="$(awk -v profile="$PROFILE" '
-  /^\\[[^]]+\\]/ {
-    section=$0; sub(/^\\[/,"",section); sub(/\\].*$/,"",section)
+  /^\[[^]]+\]/ {
+    section=$0; sub(/^\[/,"",section); sub(/\].*$/,"",section)
     active=(section==profile)
     next
   }
