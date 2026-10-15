@@ -1,0 +1,100 @@
+name: Oracle A1 Always Free — bounded retry
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 */6 * * *'
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: oracle-a1-always-free
+  cancel-in-progress: false
+
+jobs:
+  attempt:
+    # Deliberately disabled until OCI trust, least-privilege policy and SSH public key are configured.
+    if: ${{ github.repository == 'CHEMOPHILIA/CHEMISTRY' && github.ref == 'refs/heads/main' && vars.OCI_AUTO_ENABLED == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Validate required configuration
+        env:
+          OCI_DOMAIN: ${{ vars.OCI_WIF_DOMAIN_URL }}
+          OCI_CLIENT: ${{ vars.OCI_WIF_CLIENT_ID }}
+          OCI_TENANCY: ${{ secrets.OCI_TENANCY_OCID }}
+          OCI_CLIENT_SECRET: ${{ secrets.OCI_WIF_CLIENT_SECRET }}
+          OCI_PUB: ${{ secrets.OCI_SSH_PUBLIC_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for v in OCI_DOMAIN OCI_CLIENT OCI_TENANCY OCI_CLIENT_SECRET OCI_PUB; do
+            [[ -n "${!v}" ]] || { echo "::error::Missing required GitHub secret or variable: $v"; exit 1; }
+          done
+          [[ "$OCI_PUB" == ssh-rsa* ]] || { echo "::error::An existing RSA SSH public key is required."; exit 1; }
+          echo "Oracle OIDC configuration fields are present (values redacted)."
+
+      - name: Install official Oracle CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check --quiet --user oci-cli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Exchange GitHub OIDC for OCI RPST
+        env:
+          OCI_WIF_DOMAIN_URL: ${{ vars.OCI_WIF_DOMAIN_URL }}
+          OCI_WIF_CLIENT_ID: ${{ vars.OCI_WIF_CLIENT_ID }}
+          OCI_WIF_CLIENT_SECRET: ${{ secrets.OCI_WIF_CLIENT_SECRET }}
+          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+        run: python3 life-os/oracle/github_oidc_login.py
+
+      - name: Verify OCI session
+        env:
+          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          oci iam availability-domain list --region ap-tokyo-1 --compartment-id "$OCI_TENANCY_OCID" --output json > /dev/null
+          echo "OCI authentication and Tokyo region access verified."
+
+      - name: Detect an existing Life OS instance
+        id: existing
+        env:
+          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          oci compute instance list --region ap-tokyo-1 --compartment-id "$OCI_TENANCY_OCID" --all > "$RUNNER_TEMP/instances.json"
+          if jq -e '[.data[] | select(."display-name"=="life-os" and ."lifecycle-state"!="TERMINATED")] | length > 0' "$RUNNER_TEMP/instances.json" >/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Life OS VM already exists; avoiding duplicate."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Attempt only free A1 shapes
+        if: ${{ steps.existing.outputs.exists == 'false' }}
+        env:
+          LIFE_OS_SSH_PUBLIC_KEY: ${{ secrets.OCI_SSH_PUBLIC_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash life-os/oracle/bootstrap.sh
+
+      - name: Record result
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          {
+            echo "### Oracle A1 attempt"
+            echo "The run only attempts VM.Standard.A1.Flex at 2/12 GB or 1/6 GB."
+            echo "Success in CI does not prove Chromium/cloud-init setup or browser bridge functionality."
+            echo "See preceding job logs for authorized OCI API result (secrets are not printed)."
+          } >> "$GITHUB_STEP_SUMMARY"
