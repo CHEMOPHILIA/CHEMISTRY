@@ -5,12 +5,12 @@ REG=ap-tokyo-1
 D="$HOME/life-os-setup"
 mkdir -p "$D"; chmod 700 "$D"
 # Prevent two Cloud Shell invocations racing to create duplicate infrastructure.
+command -v flock >/dev/null || { echo 'STOP: flock required' >&2; exit 1; }
 exec 9>"$D/.provision.lock"
 flock -n 9 || { echo 'STOP: another life-os provisioner is running' >&2; exit 1; }
 die(){ echo "STOP: $*" >&2; exit 1; }
 command -v oci >/dev/null || die 'Use the Oracle Cloud Shell terminal.'
 command -v jq >/dev/null || die 'jq required.'
-command -v flock >/dev/null || die 'flock required.'
 # Oracle Cloud Shell uses /etc/oci/config and a region-named profile;
 # unlike a local CLI install, Cloud Shell normally has no [DEFAULT] profile.
 CFG="${OCI_CLI_CONFIG_FILE:-/etc/oci/config}"
