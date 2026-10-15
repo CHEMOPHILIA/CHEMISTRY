@@ -43,10 +43,16 @@ IMG="$(jq -r '[.data[]|select(."lifecycle-state"=="AVAILABLE" and (."display-nam
 [[ "$IMG" == ocid1.image.* ]] || die 'No Ubuntu 24.04 ARM image: stopped.'
 oci network vcn list --region "$REG" --compartment-id "$T" --all > "$D/vcns.json" || die 'Cannot inspect VCNs.'
 VCN="$(jq -r '[.data[]|select(."display-name"=="life-os-vcn" and ."lifecycle-state"=="AVAILABLE")]|.[0].id//empty' "$D/vcns.json")"
-K="$HOME/.ssh/life-os-ed25519"
+# Oracle Cloud Shell may enforce FIPS mode, which rejects ED25519 key generation.
+# RSA-4096 is permitted in FIPS mode and works with Ubuntu OpenSSH.
+K="$HOME/.ssh/life-os-rsa4096"
 mkdir -p "$HOME/.ssh"; chmod 700 "$HOME/.ssh"
-if [[ ! -f "$K" ]]; then ssh-keygen -q -t ed25519 -f "$K" -N '' -C life-os; fi
-chmod 600 "$K"; [[ -f "$K.pub" ]] || die 'SSH key missing.'
+if [[ ! -e "$K" && ! -e "$K.pub" ]]; then
+ ssh-keygen -q -t rsa -b 4096 -f "$K" -N '' -C life-os || die 'RSA-4096 key generation failed.'
+fi
+[[ -s "$K" && -s "$K.pub" ]] || die 'RSA key pair is incomplete; refusing to overwrite it.'
+chmod 600 "$K"; chmod 644 "$K.pub"
+ssh-keygen -y -f "$K" >/dev/null || die 'RSA private key integrity check failed.'
 echo 'Creating isolated OCI network. Only SSH port 22 will be accessible.'
 if [[ -z "$VCN" ]]; then
  VCN="$(oci network vcn create --region "$REG" --compartment-id "$T" --display-name life-os-vcn --cidr-blocks '["10.42.0.0/16"]' --dns-label lifeos --wait-for-state AVAILABLE --query data.id --raw-output)"
