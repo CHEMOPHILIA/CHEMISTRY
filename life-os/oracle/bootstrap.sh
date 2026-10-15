@@ -4,9 +4,13 @@ set -Eeuo pipefail
 REG=ap-tokyo-1
 D="$HOME/life-os-setup"
 mkdir -p "$D"; chmod 700 "$D"
+# Prevent two Cloud Shell invocations racing to create duplicate infrastructure.
+exec 9>"$D/.provision.lock"
+flock -n 9 || { echo 'STOP: another life-os provisioner is running' >&2; exit 1; }
 die(){ echo "STOP: $*" >&2; exit 1; }
 command -v oci >/dev/null || die 'Use the Oracle Cloud Shell terminal.'
 command -v jq >/dev/null || die 'jq required.'
+command -v flock >/dev/null || die 'flock required.'
 # Oracle Cloud Shell uses /etc/oci/config and a region-named profile;
 # unlike a local CLI install, Cloud Shell normally has no [DEFAULT] profile.
 CFG="${OCI_CLI_CONFIG_FILE:-/etc/oci/config}"
@@ -52,7 +56,9 @@ if [[ ! -e "$K" && ! -e "$K.pub" ]]; then
 fi
 [[ -s "$K" && -s "$K.pub" ]] || die 'RSA key pair is incomplete; refusing to overwrite it.'
 chmod 600 "$K"; chmod 644 "$K.pub"
-ssh-keygen -y -f "$K" >/dev/null || die 'RSA private key integrity check failed.'
+DERIVED_PUB="$(ssh-keygen -y -f "$K")" || die 'RSA private key integrity check failed.'
+EXPECTED_PUB="$(awk 'NR==1 {print $1" "$2}' "$K.pub")"
+[[ "$(awk '{print $1" "$2}' <<< "$DERIVED_PUB")" == "$EXPECTED_PUB" ]] || die 'Public/private SSH keys do not match.'
 echo 'Preparing isolated life-os subnet: no public inbound management ports.'
 if [[ -z "$VCN" ]]; then
  VCN="$(oci network vcn create --region "$REG" --compartment-id "$T" --display-name life-os-vcn --cidr-blocks '["10.42.0.0/16"]' --dns-label lifeos --wait-for-state AVAILABLE --query data.id --raw-output)"
