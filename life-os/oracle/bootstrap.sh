@@ -7,8 +7,24 @@ mkdir -p "$D"; chmod 700 "$D"
 die(){ echo "STOP: $*" >&2; exit 1; }
 command -v oci >/dev/null || die 'Use the Oracle Cloud Shell terminal.'
 command -v jq >/dev/null || die 'jq required.'
-T="$(awk '/^\[DEFAULT\]/{a=1;next} /^\[/{a=0} a && /^tenancy[[:space:]]*=/{sub(/^[^=]*=/,"");gsub(/[[:space:]]/,"");print;exit}' "$HOME/.oci/config" 2>/dev/null || true)"
-[[ "$T" == ocid1.tenancy.* ]] || die 'Tenancy not found in Cloud Shell OCI config.'
+# Oracle Cloud Shell uses /etc/oci/config and a region-named profile;
+# unlike a local CLI install, Cloud Shell normally has no [DEFAULT] profile.
+CFG="${OCI_CLI_CONFIG_FILE:-/etc/oci/config}"
+PROFILE="${OCI_CLI_PROFILE:-ap-tokyo-1}"
+T="${OCI_CLI_TENANCY:-${OCI_TENANCY_OCID:-}}"
+if [[ "$T" != ocid1.tenancy.* ]]; then
+ T="$(awk -v profile="$PROFILE" '
+  /^\\[[^]]+\\]/ {
+    section=$0; sub(/^\\[/,"",section); sub(/\\].*$/,"",section)
+    active=(section==profile)
+    next
+  }
+  active && /^[[:space:]]*tenancy[[:space:]]*=/ {
+    sub(/^[^=]*=/,""); gsub(/[[:space:]]/,"");print;exit
+  }' "$CFG" 2>/dev/null || true)"
+fi
+[[ "$T" == ocid1.tenancy.* ]] || die "Cannot read tenancy from Cloud Shell profile '$PROFILE' in '$CFG'. No resources created."
+echo 'Oracle Cloud Shell tenancy resolved successfully.'
 oci iam availability-domain list --region "$REG" --compartment-id "$T" > "$D/ads.json" || die 'OCI authentication/Tokyo access failed.'
 jq -e '.data|length>0' "$D/ads.json" >/dev/null || die 'No available domains.'
 oci iam compartment list --region "$REG" --compartment-id "$T" --compartment-id-in-subtree true --all > "$D/comp.json" || die 'Cannot audit compartments.'
