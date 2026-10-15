@@ -49,16 +49,29 @@ oci network vcn list --region "$REG" --compartment-id "$T" --all > "$D/vcns.json
 VCN="$(jq -r '[.data[]|select(."display-name"=="life-os-vcn" and ."lifecycle-state"=="AVAILABLE")]|.[0].id//empty' "$D/vcns.json")"
 # Oracle Cloud Shell may enforce FIPS mode, which rejects ED25519 key generation.
 # RSA-4096 is permitted in FIPS mode and works with Ubuntu OpenSSH.
-K="$HOME/.ssh/life-os-rsa4096"
-mkdir -p "$HOME/.ssh"; chmod 700 "$HOME/.ssh"
-if [[ ! -e "$K" && ! -e "$K.pub" ]]; then
- ssh-keygen -q -t rsa -b 4096 -f "$K" -N '' -C life-os || die 'RSA-4096 key generation failed.'
+# In ephemeral GitHub runners, inject an existing, persistent public key.
+# Never create an unretained SSH private key on an ephemeral CI worker.
+if [[ -n "${LIFE_OS_SSH_PUBLIC_KEY:-}" ]]; then
+ K_PUB="$D/ssh-authorized.pub"
+ printf '%s\n' "$LIFE_OS_SSH_PUBLIC_KEY" > "$K_PUB"
+ chmod 600 "$K_PUB"
+ [[ "$(wc -l < "$K_PUB")" -eq 1 ]] || die 'SSH public key must be one line.'
+ ssh-keygen -lf "$K_PUB" >/dev/null || die 'Provided SSH public key is invalid.'
+elif [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+ die 'CI requires LIFE_OS_SSH_PUBLIC_KEY from an existing persistent key.'
+else
+ K="$HOME/.ssh/life-os-rsa4096"
+ mkdir -p "$HOME/.ssh"; chmod 700 "$HOME/.ssh"
+ if [[ ! -e "$K" && ! -e "$K.pub" ]]; then
+  ssh-keygen -q -t rsa -b 4096 -f "$K" -N '' -C life-os || die 'RSA-4096 key generation failed.'
+ fi
+ [[ -s "$K" && -s "$K.pub" ]] || die 'RSA key pair is incomplete; refusing to overwrite it.'
+ chmod 600 "$K"; chmod 644 "$K.pub"
+ DERIVED_PUB="$(ssh-keygen -y -f "$K")" || die 'RSA private key integrity check failed.'
+ EXPECTED_PUB="$(awk 'NR==1 {print $1" "$2}' "$K.pub")"
+ [[ "$(awk '{print $1" "$2}' <<< "$DERIVED_PUB")" == "$EXPECTED_PUB" ]] || die 'Public/private SSH keys do not match.'
+ K_PUB="$K.pub"
 fi
-[[ -s "$K" && -s "$K.pub" ]] || die 'RSA key pair is incomplete; refusing to overwrite it.'
-chmod 600 "$K"; chmod 644 "$K.pub"
-DERIVED_PUB="$(ssh-keygen -y -f "$K")" || die 'RSA private key integrity check failed.'
-EXPECTED_PUB="$(awk 'NR==1 {print $1" "$2}' "$K.pub")"
-[[ "$(awk '{print $1" "$2}' <<< "$DERIVED_PUB")" == "$EXPECTED_PUB" ]] || die 'Public/private SSH keys do not match.'
 echo 'Preparing isolated life-os subnet: no public inbound management ports.'
 if [[ -z "$VCN" ]]; then
  VCN="$(oci network vcn create --region "$REG" --compartment-id "$T" --display-name life-os-vcn --cidr-blocks '["10.42.0.0/16"]' --dns-label lifeos --wait-for-state AVAILABLE --query data.id --raw-output)"
@@ -140,7 +153,7 @@ for SPEC in '2:12' '1:6'; do
  CONFIG="$(jq -cn --argjson cpu "$OCPU" --argjson memory "$RAM" '{ocpus:$cpu,memoryInGBs:$memory}')"
  for AD in $(jq -r '.data[].name' "$D/ads.json"); do
   echo "Trying Always Free VM.Standard.A1.Flex ${OCPU} OCPU/${RAM}GB in $AD"
-  if J="$(oci compute instance launch --region "$REG" --compartment-id "$T" --availability-domain "$AD" --display-name life-os --shape VM.Standard.A1.Flex --shape-config "$CONFIG" --image-id "$IMG" --boot-volume-size-in-gbs 50 --subnet-id "$SUB" --assign-public-ip true --ssh-authorized-keys-file "$K.pub" --user-data-file "$D/cloud-init.yaml" 2>"$D/launch.err")"; then
+  if J="$(oci compute instance launch --region "$REG" --compartment-id "$T" --availability-domain "$AD" --display-name life-os --shape VM.Standard.A1.Flex --shape-config "$CONFIG" --image-id "$IMG" --boot-volume-size-in-gbs 50 --subnet-id "$SUB" --assign-public-ip true --ssh-authorized-keys-file "$K_PUB" --user-data-file "$D/cloud-init.yaml" 2>"$D/launch.err")"; then
    ID="$(jq -r '.data.id//empty' <<< "$J")"
    CHOSEN="${OCPU} OCPU / ${RAM}GB"
    break
@@ -156,5 +169,6 @@ VN="$(oci compute vnic-attachment list --region "$REG" --compartment-id "$T" --i
 IP="$(oci network vnic get --region "$REG" --vnic-id "$VN" --query 'data."public-ip"' --raw-output)"
 PRIVATE_IP="$(oci network vnic get --region "$REG" --vnic-id "$VN" --query 'data."private-ip"' --raw-output)"
 [[ "$PRIVATE_IP" == *.*.*.* ]] || die 'VM RUNNING, but private IP not resolved.'
-printf '\nCREATED RUNNING: %s\nShape: %s\nPrivate IP: %s\nPublic IP (outbound only): %s\nKey: %s\nFrom Cloud Shell PRIVATE networking: ssh -i %s ubuntu@%s\n' "$ID" "$CHOSEN" "$PRIVATE_IP" "$IP" "$K" "$K" "$PRIVATE_IP"
+printf '\nCREATED RUNNING: %s\nShape: %s\nPrivate IP: %s\nPublic IP (outbound only): %s\n' "$ID" "$CHOSEN" "$PRIVATE_IP" "$IP"
+if [[ -z "${GITHUB_ACTIONS:-}" ]]; then printf 'From Cloud Shell PRIVATE networking: ssh -i %s ubuntu@%s\n' "$K" "$PRIVATE_IP"; fi
 printf 'Cloud-init requested Docker, snap Chromium, and Xvfb. RUNNING does not prove successful installation.\nCloud Shell Private Networking is required for SSH; internet ingress is disabled. Web Bridge is NOT deployed.\n'
