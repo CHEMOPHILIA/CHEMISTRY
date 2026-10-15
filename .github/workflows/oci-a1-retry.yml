@@ -44,8 +44,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 -m pip install --disable-pip-version-check --quiet --user oci-cli
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          python3 -m venv "$RUNNER_TEMP/oci-venv"
+          "$RUNNER_TEMP/oci-venv/bin/pip" install --disable-pip-version-check --quiet oci-cli
+          echo "$RUNNER_TEMP/oci-venv/bin" >> "$GITHUB_PATH"
 
       - name: Exchange GitHub OIDC for OCI RPST
         env:
