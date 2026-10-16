@@ -3,6 +3,7 @@ on:
   push:
     paths:
       - 'life-os/oracle/bootstrap.sh'
+      - 'life-os/oracle/guest-provision.sh'
       - '.github/workflows/oracle-bootstrap-lint.yml'
   workflow_dispatch:
 permissions:
@@ -13,7 +14,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Bash syntax
-        run: bash -n life-os/oracle/bootstrap.sh
+        run: |
+          bash -n life-os/oracle/bootstrap.sh
+          bash -n life-os/oracle/guest-provision.sh
       - name: Free-tier and security invariants
         shell: bash
         run: |
@@ -31,3 +34,32 @@ jobs:
           fi
           # Verify the jq ingress rule assertion itself against positive and negative samples.
           jq -ne '{data:{"ingress-security-rules":[{"source":"10.42.0.0/16","protocol":"6","tcp-options":{"destination-port-range":{"min":22,"max":22}}}]}} | [.data."ingress-security-rules"[]] | length == 1 and (.[0].source=="10.42.0.0/16") and (.[0].protocol=="6") and (.[0]."tcp-options"."destination-port-range".min==22) and (.[0]."tcp-options"."destination-port-range".max==22)' >/dev/null
+      - name: Validate generated cloud-init payload and installer integrity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          testfile=life-os/oracle/.cloud-init-smoketest.sh
+          {
+            printf '#!/usr/bin/env bash\nset -Eeuo pipefail\nD="$(mktemp -d)"\n'
+            sed -n '/^# Bundle the guest installer in cloud-init/,/^# Try requested 2 OCPU\/12GB/{/^# Try requested 2 OCPU\/12GB/!p;}' life-os/oracle/bootstrap.sh
+            printf 'printf "CLOUD_INIT_PATH=%%s\n" "$D/cloud-init.yaml"\n'
+          } > "$testfile"
+          bash -n "$testfile"
+          bash "$testfile" | tee /tmp/cloud-init-check.txt
+          cloud_init="$(sed -n 's/^CLOUD_INIT_PATH=//p' /tmp/cloud-init-check.txt)"
+          test -s "$cloud_init"
+          python3 -m pip install --quiet --break-system-packages PyYAML
+          python3 - "$cloud_init" <<'PY'
+          import base64,gzip,pathlib,subprocess,sys,yaml
+          payload=yaml.safe_load(pathlib.Path(sys.argv[1]).read_text())
+          files=payload["write_files"]
+          assert files[0]["path"]=="/usr/local/sbin/life-os-guest-provision"
+          assert files[0]["encoding"]=="gz+b64"
+          guest=gzip.decompress(base64.b64decode(files[0]["content"]))
+          expected=pathlib.Path("life-os/oracle/guest-provision.sh").read_bytes()
+          assert guest==expected, "Embedded installer differs from repository"
+          assert files[1]["path"]=="/etc/systemd/system/life-os-guest.service"
+          assert payload["runcmd"], "Missing automatic systemd startup"
+          assert pathlib.Path(sys.argv[1]).stat().st_size<=15500
+          print("PASS: cloud-init YAML, exact guest script, unit, size")
+          PY
