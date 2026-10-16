@@ -129,20 +129,43 @@ fi
 oci network subnet get --region "$REG" --subnet-id "$SUB" > "$D/subnet-final.json" || die 'Cannot verify subnet.'
 jq -e --arg rt "$RT" --arg sl "$SL" '.data."route-table-id"==$rt and .data."security-list-ids"==[$sl]' "$D/subnet-final.json" >/dev/null || die 'Subnet isolation not confirmed.'
 echo 'Subnet verified: SSH only from the private VCN range; no internet ingress rules.'
-# OS first-boot provisioning; no credentials, VPN tokens, or ChatGPT cookies embedded.
-# Cloud-init runs independently of the VM RUNNING state. Verify cloud-init separately.
-cat > "$D/cloud-init.yaml" <<'CLOUDINIT'
+# Bundle the guest installer in cloud-init: VM does not need GitHub credentials.
+# Cloud Shell single-file use fetches a specific immutable GitHub commit.
+GUEST="$(cd "$(dirname "$0")" && pwd)/guest-provision.sh"
+if [[ ! -s "$GUEST" ]]; then
+ GUEST="$D/guest-provision.sh"
+ curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --max-time 40 \
+  'https://raw.githubusercontent.com/CHEMOPHILIA/CHEMISTRY/cd6486679f9a4d2194f933459f844279ea9c50a8/life-os/oracle/guest-provision.sh' \
+  -o "$GUEST" || die 'Could not retrieve pinned guest installer.'
+fi
+bash -n "$GUEST" || die 'Guest installer Bash syntax error.'
+GUEST_COMPRESSED="$(gzip -cn "$GUEST" | base64 -w0)" || die 'Cannot package guest installer.'
+cat > "$D/cloud-init.yaml" <<CLOUDINIT
 #cloud-config
-package_update: true
-packages:
-  - docker.io
-  - snapd
-  - xvfb
+write_files:
+  - path: /usr/local/sbin/life-os-guest-provision
+    owner: root:root
+    permissions: '0700'
+    encoding: gz+b64
+    content: $GUEST_COMPRESSED
+  - path: /etc/systemd/system/life-os-guest.service
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Life OS ARM64 first boot, browser and reboot verification
+      Wants=network-online.target
+      After=network-online.target cloud-final.service
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/life-os-guest-provision
+      TimeoutStartSec=1800
+      [Install]
+      WantedBy=multi-user.target
 runcmd:
-  - [ systemctl, enable, --now, docker ]
-  - [ snap, install, chromium ]
-  - [ bash, -lc, "uname -m > /var/log/life-os-arm64-check.log; docker --version > /var/log/life-os-docker-check.log; /snap/bin/chromium --version > /var/log/life-os-chromium-check.log" ]
+  - [ bash, -lc, "systemctl daemon-reload && systemctl enable life-os-guest.service && systemctl start --no-block life-os-guest.service" ]
 CLOUDINIT
+[[ "$(wc -c < "$D/cloud-init.yaml")" -le 15500 ]] || die 'Cloud-init payload exceeds conservative metadata budget.'
 # Try requested 2 OCPU/12GB first, then smaller 1 OCPU/6GB, both A1 Always Free.
 # Do not try paid shapes and never retry non-capacity errors.
 ID=''
