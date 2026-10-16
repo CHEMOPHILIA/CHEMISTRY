@@ -121,9 +121,20 @@ if [[ -z "$SUB" ]]; then
  SUB="$(oci network subnet create --region "$REG" --compartment-id "$T" --vcn-id "$VCN" --cidr-block 10.42.1.0/24 --display-name life-os-subnet --dns-label subnet --prohibit-public-ip-on-vnic false --route-table-id "$RT" --security-list-ids "$SLIDS" --wait-for-state AVAILABLE --query data.id --raw-output)" || die 'Subnet creation failed.'
 else
  oci network subnet get --region "$REG" --subnet-id "$SUB" > "$D/subnet.json" || die 'Cannot inspect existing subnet.'
- jq -e '.data."cidr-block"=="10.42.1.0/24" and .data."vcn-id"!=null and .data."prohibit-public-ip-on-vnic"==false' "$D/subnet.json" >/dev/null || die 'Existing subnet does not match expected configuration.'
- # This script has already stopped if any VM or volume exists; avoid shared-default VCN edits.
- oci network subnet update --region "$REG" --subnet-id "$SUB" --route-table-id "$RT" --security-list-ids "$SLIDS" --force >/dev/null || die 'Isolated subnet configuration failed.'
+ jq -e --arg vcn "$VCN" '.data."cidr-block"=="10.42.1.0/24" and .data."vcn-id"==$vcn and .data."prohibit-public-ip-on-vnic"==false' "$D/subnet.json" >/dev/null || die 'Existing subnet does not match expected configuration.'
+ if ! jq -e --arg rt "$RT" --arg sl "$SL" '.data."route-table-id"==$rt and .data."security-list-ids"==[$sl]' "$D/subnet.json" >/dev/null; then
+  # Never overwrite legacy subnet routing/security rules: it may serve other assets.
+  # Build a dedicated free subnet instead; refuse any address-space collision.
+  echo 'Existing legacy subnet has other rules; preserving it. Using a new dedicated subnet.'
+  SUB="$(jq -r '[.data[]|select(."display-name"=="life-os-isolated-subnet" and ."lifecycle-state"=="AVAILABLE")]|.[0].id//empty' "$D/subnets.json")"
+  if [[ -z "$SUB" ]]; then
+   jq -e '[.data[]|select(."lifecycle-state"!="TERMINATED" and ."cidr-block"=="10.42.2.0/24")]|length==0' "$D/subnets.json" >/dev/null || die 'Isolated subnet CIDR already allocated; no changes made.'
+   SUB="$(oci network subnet create --region "$REG" --compartment-id "$T" --vcn-id "$VCN" --cidr-block 10.42.2.0/24 --display-name life-os-isolated-subnet --dns-label isolated --prohibit-public-ip-on-vnic false --route-table-id "$RT" --security-list-ids "$SLIDS" --wait-for-state AVAILABLE --query data.id --raw-output)" || die 'Isolated subnet creation failed.'
+  else
+   oci network subnet get --region "$REG" --subnet-id "$SUB" > "$D/subnet-isolated.json" || die 'Cannot inspect existing isolated subnet.'
+   jq -e --arg vcn "$VCN" --arg rt "$RT" --arg sl "$SL" '.data."vcn-id"==$vcn and .data."cidr-block"=="10.42.2.0/24" and .data."prohibit-public-ip-on-vnic"==false and .data."route-table-id"==$rt and .data."security-list-ids"==[$sl]' "$D/subnet-isolated.json" >/dev/null || die 'Existing isolated subnet configuration mismatch.'
+  fi
+ fi
 fi
 [[ "$SUB" == ocid1.subnet.* ]] || die 'Subnet failed.'
 oci network subnet get --region "$REG" --subnet-id "$SUB" > "$D/subnet-final.json" || die 'Cannot verify subnet.'
