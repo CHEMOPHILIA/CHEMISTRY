@@ -1,0 +1,78 @@
+name: OCI Chat read-only access probe
+
+on:
+  push:
+    paths:
+      - '.github/workflows/oci-chat-access-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  probe:
+    if: ${{ github.repository == 'CHEMOPHILIA/CHEMISTRY' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check existing OCI authentication configuration without revealing values
+        id: precheck
+        env:
+          OCI_WIF_DOMAIN_URL: ${{ vars.OCI_WIF_DOMAIN_URL }}
+          OCI_WIF_CLIENT_ID: ${{ vars.OCI_WIF_CLIENT_ID }}
+          OCI_WIF_CLIENT_SECRET: ${{ secrets.OCI_WIF_CLIENT_SECRET }}
+          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          for item in OCI_WIF_DOMAIN_URL OCI_WIF_CLIENT_ID OCI_WIF_CLIENT_SECRET OCI_TENANCY_OCID; do
+            if [[ -z "${!item}" ]]; then
+              echo "MISSING_CONFIG_NAME=$item"
+              missing=1
+            fi
+          done
+          if [[ "$missing" -eq 0 ]]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+            echo "Configuration fields present. Values not disclosed."
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "OCI authentication unavailable in this GitHub Actions context."
+          fi
+
+      - name: Install official OCI CLI
+        if: ${{ steps.precheck.outputs.ready == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/oci-venv"
+          "$RUNNER_TEMP/oci-venv/bin/pip" install --disable-pip-version-check --quiet oci-cli
+          echo "$RUNNER_TEMP/oci-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Exchange GitHub OIDC for temporary OCI session
+        if: ${{ steps.precheck.outputs.ready == 'true' }}
+        env:
+          OCI_WIF_DOMAIN_URL: ${{ vars.OCI_WIF_DOMAIN_URL }}
+          OCI_WIF_CLIENT_ID: ${{ vars.OCI_WIF_CLIENT_ID }}
+          OCI_WIF_CLIENT_SECRET: ${{ secrets.OCI_WIF_CLIENT_SECRET }}
+          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed 's/oci-a1-retry\.yml/oci-chat-access-probe.yml/' life-os/oracle/github_oidc_login.py > "$RUNNER_TEMP/oci_chat_probe_login.py"
+          python3 "$RUNNER_TEMP/oci_chat_probe_login.py"
+
+      - name: Read-only OCI IAM connectivity test
+        if: ${{ steps.precheck.outputs.ready == 'true' }}
+        env:
+          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          oci iam availability-domain list --region ap-tokyo-1 --compartment-id "$OCI_TENANCY_OCID" --output json > /dev/null
+          echo "OCI_AUTHENTICATED_READ_SUCCESS"
